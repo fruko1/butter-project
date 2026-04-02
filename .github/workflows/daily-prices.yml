@@ -1,0 +1,31 @@
+name: Daily Butter Prices
+
+on:
+  schedule:
+    # Každý den v 7:00 UTC = 8:00 CET (zima) / 9:00 CEST (léto)
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    # Manuální spuštění pro testování (tlačítko "Run workflow" na GitHubu)
+
+jobs:
+  scrape-and-notify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout kódu
+        uses: actions/checkout@v4
+
+      - name: Nastavit Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Nainstalovat závislosti
+        run: pip install -r requirements.txt
+
+      - name: Spustit scraper a odeslat na Telegram
+        run: python scraper.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
