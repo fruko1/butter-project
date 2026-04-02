@@ -10,12 +10,23 @@ import json
 from datetime import date
 from playwright.sync_api import sync_playwright
 
+
 def _clean_secret(value: str) -> str:
     """Odstraní VŠECHNY non-printable znaky z GitHub Secrets."""
     return re.sub(r"[^\x21-\x7E]", "", value).strip()
 
+
 TELEGRAM_TOKEN = _clean_secret(os.environ.get("TELEGRAM_BOT_TOKEN", ""))
 TELEGRAM_CHAT_ID = _clean_secret(os.environ.get("TELEGRAM_CHAT_ID", ""))
+
+# Klíčová slova pro filtrování — jen produkty s těmito slovy v názvu
+BUTTER_KEYWORDS = ["máslo", "maslo", "butter"]
+
+
+def _is_butter(name: str) -> bool:
+    """Vrátí True pokud název produktu obsahuje slovo máslo."""
+    name_lower = name.lower()
+    return any(kw in name_lower for kw in BUTTER_KEYWORDS)
 
 
 def _parse_price(text: str) -> float | None:
@@ -30,188 +41,147 @@ def _parse_price(text: str) -> float | None:
     return None
 
 
-def scrape_rohlik(page) -> list[dict]:
-    """Rohlik.cz — headless browser scraping."""
+def _extract_cards(page, store: str) -> list[dict]:
+    """Obecná extrakce produktových karet z aktuální stránky."""
     results = []
+
+    # Zkusit JSON-LD strukturovaná data
     try:
-        page.goto("https://www.rohlik.cz/hledat?q=maslo", timeout=30000)
-        page.wait_for_load_state("networkidle", timeout=15000)
-
-        # Počkat na načtení produktů
-        try:
-            page.wait_for_selector("[data-test='product-name'], h3, .ProductCard", timeout=10000)
-        except Exception:
-            pass
-
-        # Zkusit zachytit XHR odpovědi přes page.evaluate
-        products_json = page.evaluate("""
+        items_json = page.evaluate("""
             () => {
-                const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-                const results = [];
-                scripts.forEach(s => {
+                const out = [];
+                document.querySelectorAll('script[type="application/ld+json"]').forEach(s => {
                     try {
                         const d = JSON.parse(s.textContent);
-                        if (d['@type'] === 'Product' || Array.isArray(d)) {
-                            results.push(d);
-                        }
+                        const items = Array.isArray(d) ? d : (d.itemListElement ? d.itemListElement.map(e => e.item || e) : [d]);
+                        items.forEach(p => { if (p.name && p.offers) out.push(p); });
                     } catch(e) {}
                 });
-                return results;
+                return out;
             }
         """)
+        for product in items_json:
+            name = product.get("name", "")
+            if not _is_butter(name):
+                continue
+            offers = product.get("offers", {})
+            price = offers.get("price") or offers.get("lowPrice") if isinstance(offers, dict) else None
+            if price:
+                results.append({
+                    "name": name[:70],
+                    "price": float(price),
+                    "sale_price": None,
+                    "store": store,
+                })
+    except Exception:
+        pass
 
-        for item in products_json:
-            items = item if isinstance(item, list) else [item]
-            for product in items:
-                name = product.get("name", "")
-                offers = product.get("offers", {})
-                price = offers.get("price") if isinstance(offers, dict) else None
-                if name and price:
-                    results.append({
-                        "name": name[:60],
-                        "price": float(price),
-                        "sale_price": None,
-                        "store": "Rohlik.cz",
-                    })
+    # HTML fallback — obecné selektory pro produktové karty
+    if not results:
+        selectors = [
+            "article",
+            "[class*='ProductCard']",
+            "[class*='product-card']",
+            "[class*='product-tile']",
+            "[class*='ProductTile']",
+            "[class*='product-item']",
+        ]
+        cards = []
+        for sel in selectors:
+            found = page.query_selector_all(sel)
+            if len(found) > 2:
+                cards = found
+                print(f"[{store}] HTML selektor '{sel}' → {len(found)} karet")
+                break
 
-        # HTML fallback
-        if not results:
-            cards = page.query_selector_all("article, [data-test='product-name']")
-            for card in cards[:20]:
-                try:
-                    name_el = card.query_selector("h2, h3, [class*='name']")
-                    price_el = card.query_selector("[class*='price']")
-                    if not name_el or not price_el:
-                        continue
-                    name = name_el.inner_text().strip()
-                    price = _parse_price(price_el.inner_text())
-                    if name and price:
-                        results.append({
-                            "name": name[:60],
-                            "price": price,
-                            "sale_price": None,
-                            "store": "Rohlik.cz",
-                        })
-                except Exception:
-                    pass
+        for card in cards[:30]:
+            try:
+                name_el = card.query_selector(
+                    "h2, h3, [class*='name'], [class*='title'], [class*='Name'], [class*='Title']"
+                )
+                price_el = card.query_selector(
+                    "[class*='price'], [class*='Price'], [data-price]"
+                )
+                if not name_el or not price_el:
+                    continue
+                name = name_el.inner_text().strip()
+                if not _is_butter(name):
+                    continue
+                price = _parse_price(price_el.inner_text())
+                if not price:
+                    continue
+                old_price_el = card.query_selector(
+                    "[class*='original'], [class*='old'], [class*='strike'], [class*='crossed'], [class*='before']"
+                )
+                old_price = _parse_price(old_price_el.inner_text()) if old_price_el else None
+                is_sale = old_price and old_price > price
+                results.append({
+                    "name": name[:70],
+                    "price": old_price if is_sale else price,
+                    "sale_price": price if is_sale else None,
+                    "store": store,
+                })
+            except Exception:
+                pass
 
-        print(f"[Rohlik] nalezeno {len(results)} produktů")
+    return results
+
+
+def scrape_rohlik(page) -> list[dict]:
+    """Rohlik.cz — vyhledávání máslo."""
+    try:
+        page.goto("https://www.rohlik.cz/hledat?q=m%C3%A1slo", timeout=30000)
+        page.wait_for_load_state("networkidle", timeout=20000)
+        page.wait_for_timeout(2000)
+        results = _extract_cards(page, "Rohlik.cz")
+        print(f"[Rohlik] nalezeno {len(results)} produktů másla")
+        return results
     except Exception as e:
         print(f"[Rohlik] Chyba: {e}", file=sys.stderr)
-    return results
+        return []
 
 
 def scrape_kosik(page) -> list[dict]:
-    """Kosik.cz — headless browser scraping."""
-    results = []
+    """Kosik.cz — vyhledávání máslo."""
     try:
-        page.goto("https://www.kosik.cz/vyhledavani?q=maslo", timeout=30000)
-        page.wait_for_load_state("networkidle", timeout=15000)
-        try:
-            page.wait_for_selector("[class*='product'], [class*='Product']", timeout=10000)
-        except Exception:
-            pass
-
-        cards = page.query_selector_all("[class*='ProductCard'], [class*='product-card'], article")
-        for card in cards[:20]:
-            try:
-                name_el = card.query_selector("h2, h3, [class*='name'], [class*='title']")
-                price_el = card.query_selector("[class*='price'], [class*='Price']")
-                if not name_el or not price_el:
-                    continue
-                name = name_el.inner_text().strip()
-                price = _parse_price(price_el.inner_text())
-                if name and price:
-                    # Zkontrolovat původní cenu (sleva)
-                    old_price_el = card.query_selector("[class*='original'], [class*='old'], [class*='crossed']")
-                    old_price = _parse_price(old_price_el.inner_text()) if old_price_el else None
-                    results.append({
-                        "name": name[:60],
-                        "price": old_price if old_price and old_price > price else price,
-                        "sale_price": price if old_price and old_price > price else None,
-                        "store": "Kosik.cz",
-                    })
-            except Exception:
-                pass
-
-        print(f"[Kosik] nalezeno {len(results)} produktů")
+        page.goto("https://www.kosik.cz/vyhledavani?q=m%C3%A1slo", timeout=30000)
+        page.wait_for_load_state("networkidle", timeout=20000)
+        page.wait_for_timeout(2000)
+        results = _extract_cards(page, "Kosik.cz")
+        print(f"[Kosik] nalezeno {len(results)} produktů másla")
+        return results
     except Exception as e:
         print(f"[Kosik] Chyba: {e}", file=sys.stderr)
-    return results
+        return []
 
 
 def scrape_albert(page) -> list[dict]:
-    """Albert.cz — headless browser scraping."""
-    results = []
+    """Albert.cz — vyhledávání máslo."""
     try:
-        page.goto("https://www.albert.cz/search?q=maslo", timeout=30000)
-        page.wait_for_load_state("networkidle", timeout=15000)
-        try:
-            page.wait_for_selector("[class*='product'], [class*='Product']", timeout=10000)
-        except Exception:
-            pass
-
-        cards = page.query_selector_all("[class*='product-tile'], [class*='ProductTile'], [class*='product-card']")
-        for card in cards[:20]:
-            try:
-                name_el = card.query_selector("h2, h3, [class*='name'], [class*='title']")
-                price_el = card.query_selector("[class*='price'], [class*='Price']")
-                if not name_el or not price_el:
-                    continue
-                name = name_el.inner_text().strip()
-                price = _parse_price(price_el.inner_text())
-                if name and price:
-                    old_price_el = card.query_selector("[class*='original'], [class*='old'], [class*='strike']")
-                    old_price = _parse_price(old_price_el.inner_text()) if old_price_el else None
-                    results.append({
-                        "name": name[:60],
-                        "price": old_price if old_price and old_price > price else price,
-                        "sale_price": price if old_price and old_price > price else None,
-                        "store": "Albert.cz",
-                    })
-            except Exception:
-                pass
-
-        print(f"[Albert] nalezeno {len(results)} produktů")
+        page.goto("https://www.albert.cz/vyhledavani?q=m%C3%A1slo", timeout=30000)
+        page.wait_for_load_state("networkidle", timeout=20000)
+        page.wait_for_timeout(2000)
+        results = _extract_cards(page, "Albert.cz")
+        print(f"[Albert] nalezeno {len(results)} produktů másla")
+        return results
     except Exception as e:
         print(f"[Albert] Chyba: {e}", file=sys.stderr)
-    return results
+        return []
 
 
 def scrape_billa(page) -> list[dict]:
-    """Billa.cz — headless browser scraping."""
-    results = []
+    """Billa.cz — vyhledávání máslo."""
     try:
-        page.goto("https://www.billa.cz/produkty?q=maslo", timeout=30000)
-        page.wait_for_load_state("networkidle", timeout=15000)
-        try:
-            page.wait_for_selector("[class*='product'], [class*='Product']", timeout=10000)
-        except Exception:
-            pass
-
-        cards = page.query_selector_all("[class*='product-card'], [class*='ProductCard'], [class*='tile']")
-        for card in cards[:20]:
-            try:
-                name_el = card.query_selector("h2, h3, [class*='name'], [class*='title']")
-                price_el = card.query_selector("[class*='price'], [class*='Price']")
-                if not name_el or not price_el:
-                    continue
-                name = name_el.inner_text().strip()
-                price = _parse_price(price_el.inner_text())
-                if name and price:
-                    results.append({
-                        "name": name[:60],
-                        "price": price,
-                        "sale_price": None,
-                        "store": "Billa.cz",
-                    })
-            except Exception:
-                pass
-
-        print(f"[Billa] nalezeno {len(results)} produktů")
+        # Správná URL pro vyhledávání na Billa.cz
+        page.goto("https://www.billa.cz/search?q=m%C3%A1slo", timeout=30000)
+        page.wait_for_load_state("networkidle", timeout=20000)
+        page.wait_for_timeout(2000)
+        results = _extract_cards(page, "Billa.cz")
+        print(f"[Billa] nalezeno {len(results)} produktů másla")
+        return results
     except Exception as e:
         print(f"[Billa] Chyba: {e}", file=sys.stderr)
-    return results
+        return []
 
 
 def _discount_pct(original: float, sale: float) -> int:
@@ -257,7 +227,7 @@ def format_message(results: list[dict]) -> str:
         )
 
     if not results:
-        lines.append("⚠️ Dnes se nepodařilo načíst žádné ceny. Zkontroluj GitHub Actions logy.")
+        lines.append("⚠️ Dnes se nepodařilo načíst žádné ceny másla. Zkontroluj GitHub Actions logy.")
 
     return "\n".join(lines)
 
@@ -267,8 +237,6 @@ def send_telegram(message: str) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("CHYBA: TELEGRAM_BOT_TOKEN nebo TELEGRAM_CHAT_ID není nastaven.", file=sys.stderr)
         sys.exit(1)
-
-    print(f"[Telegram] token délka={len(TELEGRAM_TOKEN)}, chat_id='{TELEGRAM_CHAT_ID}'")
 
     api_url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendMessage"
     payload = {
@@ -285,7 +253,7 @@ def send_telegram(message: str) -> None:
 
 
 if __name__ == "__main__":
-    print("Stahuji ceny másla pomocí headless browseru...")
+    print("Stahuji ceny másla...")
 
     results: list[dict] = []
 
@@ -309,7 +277,7 @@ if __name__ == "__main__":
 
         browser.close()
 
-    print(f"\nCelkem nalezeno: {len(results)} produktů")
+    print(f"\nCelkem nalezeno: {len(results)} produktů másla")
     message = format_message(results)
     print("\n--- Náhled zprávy ---")
     print(message)
