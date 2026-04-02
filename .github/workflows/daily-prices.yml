@@ -2,8 +2,10 @@ name: Daily Butter Prices
 
 on:
   schedule:
+    # Každý den v 7:00 UTC = 8:00 CET (zima) / 9:00 CEST (léto)
     - cron: '0 7 * * *'
   workflow_dispatch:
+    # Manuální spuštění pro testování (tlačítko "Run workflow" na GitHubu)
 
 jobs:
   scrape-and-notify:
