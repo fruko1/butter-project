@@ -9,6 +9,7 @@ import sys
 import json
 from datetime import date
 from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
 
 def _clean_secret(value: str) -> str:
     """Odstraní VŠECHNY non-printable znaky z GitHub Secrets."""
@@ -301,6 +302,7 @@ if __name__ == "__main__":
             viewport={"width": 1280, "height": 800},
         )
         page = context.new_page()
+        stealth_sync(page)  # skryje znaky headless browseru
 
         results += scrape_rohlik(page)
         results += scrape_kosik(page)
