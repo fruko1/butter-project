@@ -24,6 +24,9 @@ jobs:
       - name: Nainstalovat závislosti
         run: pip install -r requirements.txt
 
+      - name: Nainstalovat Playwright prohlížeče
+        run: playwright install chromium --with-deps
+
       - name: Spustit scraper a odeslat na Telegram
         run: python scraper.py
         env:
