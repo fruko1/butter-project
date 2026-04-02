@@ -19,14 +19,20 @@ def _clean_secret(value: str) -> str:
 TELEGRAM_TOKEN = _clean_secret(os.environ.get("TELEGRAM_BOT_TOKEN", ""))
 TELEGRAM_CHAT_ID = _clean_secret(os.environ.get("TELEGRAM_CHAT_ID", ""))
 
-# Klíčová slova pro filtrování — jen produkty s těmito slovy v názvu
-BUTTER_KEYWORDS = ["máslo", "maslo", "butter"]
+# Produkty které URČITĚ nejsou máslo (výsledky z nesouvisejících sekcí stránky)
+NOT_BUTTER = ["šunka", "klobás", "meloun", "vanilka", "sýr", "jogurt", "mléko", "káva", "čaj", "pivo", "víno"]
 
 
 def _is_butter(name: str) -> bool:
-    """Vrátí True pokud název produktu obsahuje slovo máslo."""
+    """
+    Vrátí True pokud produkt MŮŽE být máslo.
+    Jsme už na stránce vyhledávání másla — filtrujeme jen zjevně nesouvisející produkty.
+    """
     name_lower = name.lower()
-    return any(kw in name_lower for kw in BUTTER_KEYWORDS)
+    # Vyloučit zjevně nesouvisející produkty
+    if any(kw in name_lower for kw in NOT_BUTTER):
+        return False
+    return True
 
 
 def _parse_price(text: str) -> float | None:
@@ -130,9 +136,13 @@ def _extract_cards(page, store: str) -> list[dict]:
 def scrape_rohlik(page) -> list[dict]:
     """Rohlik.cz — vyhledávání máslo."""
     try:
-        page.goto("https://www.rohlik.cz/hledat?q=m%C3%A1slo", timeout=30000)
-        page.wait_for_load_state("networkidle", timeout=20000)
-        page.wait_for_timeout(2000)
+        page.goto("https://www.rohlik.cz/hledat?q=m%C3%A1slo", timeout=45000)
+        # Rohlik je React SPA — čekáme na konkrétní element, ne na networkidle
+        try:
+            page.wait_for_selector("article, [class*='ProductCard'], [class*='product']", timeout=15000)
+        except Exception:
+            pass
+        page.wait_for_timeout(3000)
         results = _extract_cards(page, "Rohlik.cz")
         print(f"[Rohlik] nalezeno {len(results)} produktů másla")
         return results
