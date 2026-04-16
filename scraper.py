@@ -156,18 +156,18 @@ def _scrape_with_interception(page, url: str, store: str) -> list[dict]:
     """
     captured: list[dict] = []
     seen_urls: set[str] = set()
+    all_json_urls: list[str] = []  # debug: všechny zachycené JSON URL
 
     def on_response(response: Response):
         resp_url = response.url
-        # Přeskočit opakované/utility requesty
         skip = ["analytics", "tracking", "gtm", "facebook", "google",
-                "sentry", "beacon", "datadog", "hotjar", "clarity"]
+                "sentry", "beacon", "datadog", "hotjar", "clarity",
+                ".png", ".jpg", ".woff", ".css"]
         if any(s in resp_url for s in skip):
             return
         if resp_url in seen_urls:
             return
         seen_urls.add(resp_url)
-
         if response.status != 200:
             return
         content_type = response.headers.get("content-type", "")
@@ -175,11 +175,12 @@ def _scrape_with_interception(page, url: str, store: str) -> list[dict]:
             return
         try:
             data = response.json()
+            all_json_urls.append(resp_url[:100])
             before = len(captured)
             _find_products(data, captured, store)
             found = len(captured) - before
             if found > 0:
-                print(f"[{store}] zachyceno {found} produktů z: {resp_url[:80]}")
+                print(f"[{store}] +{found} produktů z: {resp_url[:100]}")
         except Exception:
             pass
 
@@ -187,10 +188,15 @@ def _scrape_with_interception(page, url: str, store: str) -> list[dict]:
     try:
         page.goto(url, timeout=45000)
         page.wait_for_load_state("networkidle", timeout=25000)
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(3000)
     except Exception as e:
         print(f"[{store}] Načítání: {e}", file=sys.stderr)
     page.remove_listener("response", on_response)
+
+    # Debug: vypsat všechny zachycené JSON endpointy
+    print(f"[{store}] zachycené JSON requesty ({len(all_json_urls)}):")
+    for u in all_json_urls[:15]:
+        print(f"  {u}")
 
     # Deduplikace dle jména
     seen = set()
